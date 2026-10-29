@@ -8,18 +8,20 @@ set -euo pipefail
 
 ROOT=$WORK/rootfs
 
+DESKTOP_DIR=$TOP/rootfs/desktop/$DESKTOP
+[ -f "$DESKTOP_DIR/packages" ] ||
+    { echo "!! unknown DESKTOP=$DESKTOP (see rootfs/desktop/)"; exit 1; }
+
+# Base system, installed without recommends.
 PACKAGES=${PACKAGES:-"
     systemd-sysv udev dbus dbus-user-session libpam-systemd sudo locales
     ca-certificates openssh-server busybox-static less nano htop
     network-manager wpasupplicant iw rfkill
     bluez
-    xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-libinput
-    lightdm lightdm-gtk-greeter
-    xfce4 xfce4-terminal xfce4-goodies network-manager-gnome blueman
     firefox-esr fonts-noto-core
 "}
-# On-screen keyboard: first one the suite actually has wins.
-OSK_CANDIDATES=${OSK_CANDIDATES:-"onboard xvkbd"}
+# The desktop is installed with recommends: metapackages rely on them.
+DESKTOP_PACKAGES=${DESKTOP_PACKAGES:-$(sed 's/#.*//' "$DESKTOP_DIR/packages")}
 
 [ "$(id -u)" = 0 ] || { echo "!! run as root (debootstrap + chroot)"; exit 1; }
 
@@ -54,24 +56,27 @@ bootstrap() {
     rm -rf "$ROOT"
     debootstrap --arch=arm64 --variant=minbase \
         --include=apt-utils,gnupg,ca-certificates \
+        --components="$DEBIAN_COMPONENTS" \
         "$DEBIAN_SUITE" "$ROOT" "$DEBIAN_MIRROR"
 }
 
 install_packages() {
     cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
-    # Debian mirrors need contrib/non-free-firmware for some extras; keep main only
-    # unless asked, so the image is fully free apart from extracted firmware.
     in_chroot apt-get update
     # shellcheck disable=SC2086
     in_chroot apt-get install -y --no-install-recommends $PACKAGES
-    for osk in $OSK_CANDIDATES; do
-        if in_chroot apt-get install -y --no-install-recommends "$osk"; then break; fi
-    done
+    # shellcheck disable=SC2086
+    in_chroot apt-get install -y $DESKTOP_PACKAGES
     in_chroot apt-get clean
 }
 
 install_exinux_bits() {
     cp -a "$TOP/rootfs/overlay/." "$ROOT/"
+    cp -a "$DESKTOP_DIR/overlay/." "$ROOT/"
+    # environment.d covers systemd user units; pam_env covers the session itself.
+    if [ -f "$ROOT/etc/environment.d/50-exinux.conf" ]; then
+        grep -v '^#' "$ROOT/etc/environment.d/50-exinux.conf" >> "$ROOT/etc/environment"
+    fi
     aarch64-linux-gnu-gcc -O2 -Wall -static \
         -o "$ROOT/usr/local/sbin/exinux-fb-refresher" \
         "$TOP/src/fb-refresher/fb-refresher.c"
@@ -98,13 +103,11 @@ install_exinux_bits() {
         in_chroot useradd -m -s /bin/bash -G sudo,video,input "$EXINUX_USER"
     fi
     echo "$EXINUX_USER:$EXINUX_PASSWORD" | in_chroot chpasswd
-    in_chroot passwd -e "$EXINUX_USER" >/dev/null || true
 
-    in_chroot systemctl enable exinux-fb-refresher.service exinux-wlan.service exinux-grow-rootfs.service \
-        exinux-usb-gadget.service ssh.service NetworkManager.service lightdm.service
-    # Nothing to talk to on this hardware.
-    in_chroot systemctl mask systemd-rfkill.service systemd-rfkill.socket \
-        2>/dev/null || true
+    in_chroot systemctl enable exinux-fb-refresher.service exinux-wlan.service \
+        exinux-grow-rootfs.service exinux-usb-gadget.service \
+        ssh.service NetworkManager.service
+    in_chroot systemctl enable "$(cat "$DESKTOP_DIR/display-manager")"
     rm -f "$ROOT/etc/resolv.conf"
     ln -sf ../run/NetworkManager/resolv.conf "$ROOT/etc/resolv.conf"
 }

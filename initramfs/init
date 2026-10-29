@@ -86,19 +86,38 @@ wait_for() {  # wait_for <seconds> <command...>
 
 # LineageOS' userdata uses metadata encryption, so we cannot read files that
 # Android put there; internal installs overwrite userdata with rootfs.img.
+
+# Print the ext4 volume label of $1 (empty if it isn't ext2/3/4).
+ext4_label() {
+    [ "$(dd if="$1" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' ')" = 53ef ] ||
+        return 0
+    dd if="$1" bs=1 skip=1144 count=16 2>/dev/null | tr -d '\000'
+}
+
+# Sets ROOTDEV to the partition labelled "exinux", preferring the SD card.
 find_by_label() {
-    local devs
-    devs=$(blkid | grep 'LABEL="exinux"' | cut -d: -f1)
-    ROOTDEV=$(echo "$devs" | grep mmcblk | head -n1)
-    [ -n "$ROOTDEV" ] || ROOTDEV=$(echo "$devs" | head -n1)
+    local p found=
+    ROOTDEV=
+    for p in /sys/class/block/*; do
+        [ -f "$p/partition" ] || continue
+        [ "$(ext4_label "/dev/${p##*/}")" = exinux ] || continue
+        case "${p##*/}" in
+            mmcblk*) ROOTDEV=/dev/${p##*/}; return 0 ;;
+            *) [ -n "$found" ] || found=/dev/${p##*/} ;;
+        esac
+    done
+    ROOTDEV=$found
     [ -n "$ROOTDEV" ]
+}
+
+sdcard_ready() {
+    find_by_label && case "$ROOTDEV" in /dev/mmcblk*) return 0 ;; esac
+    return 1
 }
 
 mount_auto() {
     # The SD card can show up a few seconds after UFS; give it time.
-    wait_for 15 sh -c 'blkid | grep -q "mmcblk.*LABEL=\"exinux\""' ||
-        wait_for 5 find_by_label || return 1
-    find_by_label
+    wait_for 15 sdcard_ready || wait_for 5 find_by_label || return 1
     log "rootfs on $ROOTDEV"
     mount -t ext4 -o rw,noatime "$ROOTDEV" /mnt/root
 }

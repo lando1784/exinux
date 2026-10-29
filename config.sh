@@ -16,6 +16,10 @@ KERNEL_FRAGMENTS="r8s.config"    # from the kernel tree, applied before ours
 LIBUFDT_REPO=${LIBUFDT_REPO:-https://github.com/LineageOS/android_system_libufdt}
 LIBUFDT_COMMIT=${LIBUFDT_COMMIT:-df92216e3fc5f3fe289423a7819bd4a5ed3bd443}
 
+# mkbootimg.py (distro packages of it are often broken or outdated)
+MKBOOTIMG_REPO=${MKBOOTIMG_REPO:-https://github.com/LineageOS/android_system_tools_mkbootimg}
+MKBOOTIMG_COMMIT=${MKBOOTIMG_COMMIT:-808ecd09666ffe0ff5800f02af693abce56eb395}
+
 # boot.img layout, copied from device/samsung/universal9830-common/BoardConfigCommon.mk
 BOOTIMG_ARGS="--header_version 2 --base 0x10000000 --pagesize 2048 \
   --kernel_offset 0x00008000 --ramdisk_offset 0x01000000 \
@@ -28,9 +32,11 @@ EXINUX_CMDLINE=${EXINUX_CMDLINE:-"console=tty0 loglevel=7 exinux.root=auto"}
 # Root filesystem
 DEBIAN_SUITE=${DEBIAN_SUITE:-trixie}
 DEBIAN_MIRROR=${DEBIAN_MIRROR:-http://deb.debian.org/debian}
+DEBIAN_COMPONENTS=${DEBIAN_COMPONENTS:-main}
+DESKTOP=${DESKTOP:-plasma-mobile}  # or: xfce   (see rootfs/desktop/)
 ROOTFS_SIZE=${ROOTFS_SIZE:-8G}   # size of rootfs.img
 EXINUX_USER=${EXINUX_USER:-exinux}
-EXINUX_PASSWORD=${EXINUX_PASSWORD:-exinux}   # change on first login
+EXINUX_PASSWORD=${EXINUX_PASSWORD:-exinux}   # change it after first boot (passwd)
 EXINUX_HOSTNAME=${EXINUX_HOSTNAME:-exinux}
 
 # Layout

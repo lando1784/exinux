@@ -40,9 +40,22 @@ build_initramfs() {
         > "$WORK/initramfs.cpio.gz"
 }
 
+fetch_mkbootimg() {
+    local d=$WORK/mkbootimg
+    if [ ! -f "$d/mkbootimg.py" ]; then
+        rm -rf "$d"
+        git init -q "$d"
+        git -C "$d" remote add origin "$MKBOOTIMG_REPO"
+        git -C "$d" fetch -q --depth 1 origin "$MKBOOTIMG_COMMIT"
+        git -C "$d" checkout -q FETCH_HEAD
+    fi
+    MKBOOTIMG="python3 $d/mkbootimg.py"
+    UNPACK_BOOTIMG="python3 $d/unpack_bootimg.py"
+}
+
 build_bootimg() {
     # shellcheck disable=SC2086
-    mkbootimg $BOOTIMG_ARGS \
+    $MKBOOTIMG $BOOTIMG_ARGS \
         --kernel "$OUT/kernel/Image" \
         --ramdisk "$WORK/initramfs.cpio.gz" \
         --dtb "$OUT/kernel/dtb.img" \
@@ -53,6 +66,8 @@ build_bootimg() {
     size=$(stat -c %s "$OUT/boot.img")
     [ "$size" -le "$BOOT_PARTITION_SIZE" ] ||
         { echo "!! boot.img is $size bytes, partition holds $BOOT_PARTITION_SIZE"; exit 1; }
+    $UNPACK_BOOTIMG --boot_img "$OUT/boot.img" --out "$WORK/boot-unpacked" >/dev/null ||
+        { echo "!! boot.img does not unpack"; exit 1; }
     # Odin wants a tar; Heimdall flashes boot.img directly.
     tar -C "$OUT" -H ustar -cf "$OUT/exinux-boot.tar" boot.img
     echo ">> $OUT/boot.img ($size bytes), $OUT/exinux-boot.tar"
@@ -60,5 +75,6 @@ build_bootimg() {
 
 [ -f "$OUT/kernel/Image" ] || { echo "!! run scripts/build-kernel.sh first"; exit 1; }
 mkdir -p "$WORK"
+fetch_mkbootimg
 build_initramfs
 build_bootimg

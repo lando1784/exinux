@@ -46,12 +46,17 @@ pinned in `config.sh`), with extra options for systemd/Xorg/BlueZ
 (`kernel/exinux.config`), and start Debian's systemd instead of Android's
 init. The drivers we need are in that tree as normal Linux drivers:
 
-* **Display**: `drivers/video/fbdev/exynos/dpu30_dual` registers `/dev/fb0`
+* **Display**: `drivers/video/fbdev/exynos/dpu30` registers `/dev/fb0`
   and allocates scan-out memory for the default window. Because the panel
   is command mode, a frame only reaches the glass when the driver triggers
-  an update. For fbdev users it does that in `decon_pan_display()`, so
-  `exinux-fb-refresher` calls `FBIOPAN_DISPLAY` at 30 fps. Xorg uses the
-  plain `fbdev` driver with a shadow framebuffer.
+  an update; for fbdev users that happens in `decon_pan_display()`.
+  KWin (Plasma) needs DRM/KMS, so `kernel/patches/0001` adds a small
+  **DRM shim** (`exynos-decon`, built on the kernel's tinydrm helpers):
+  one fixed 1080×2400 mode, CMA dumb buffers. Every page flip or dirty
+  rectangle is copied into the DECON window and pushed with
+  `decon_pan_display()`. The same device also serves Xorg's modesetting
+  driver (Xfce). If the shim doesn't come up, `exinux-fb-refresher` keeps
+  `/dev/fb0` usable for debugging.
 * **Touch**: in-kernel input drivers, exposed through evdev and handled by libinput.
 * **Wi-Fi**: `cnss2` + `qcacld-3.0` are built in. The driver loads
   `qca6390/amss20.bin`, `bdwlan.elf*`, `m3.bin` and `wlan/qcom_cfg.ini`
@@ -62,7 +67,7 @@ init. The drivers we need are in that tree as normal Linux drivers:
 * **USB**: DWC3 + xHCI host mode for hubs, keyboards, mice and storage.
   Gadget mode (RNDIS) gives a debug network to a PC.
 
-What we give up: GPU acceleration (Mali kbase is in the kernel, but the only
+What we give up: GPU acceleration, so Plasma runs on software rendering (Mali kbase is in the kernel, but the only
 userspace driver is Android's blob), audio (Samsung ABOX needs Android HALs),
 camera and sensors. None of these are requirements.
 
@@ -77,17 +82,19 @@ camera and sensors. None of these are requirements.
    encryption, so a rootfs can only live there if userdata is overwritten
    with `rootfs.img`. `exinux.root=/dev/...` overrides the search. On
    failure it starts an RNDIS + telnet debug shell at 172.16.42.1.
-3. `switch_root` to Debian's systemd. Services in `rootfs/overlay` start the
-   panel refresher, Wi-Fi and the USB debug network, then LightDM
-   auto-logs into Xfce.
+3. `switch_root` to Debian's systemd. Services in `rootfs/overlay` start
+   Wi-Fi and the USB debug network, then SDDM auto-logs into Plasma Mobile
+   (or LightDM into Xfce with `DESKTOP=xfce`).
 
 ## Roadmap
 
 ### M1: first boot
-Get a desktop on the panel with touch and Wi-Fi. Likely fixes:
-* panel stays black → check `dmesg | grep decon` and the refresher log; the
-  bootloader may hand over a different DECON state than Android's HWC expects
-* pixel format / stride mismatches in Xorg fbdev
+Get Plasma Mobile on the panel with touch and Wi-Fi. Likely fixes:
+* panel stays black → check `dmesg | grep -i decon` and that `/dev/dri/card0`
+  exists; the bootloader may hand over a different DECON state than
+  Android's HWC expects
+* red/blue swapped → change the DRM format in the shim
+* CMA too small for KWin's buffers → raise `CONFIG_CMA_SIZE_MBYTES`
 * `qcacld` waiting for `cnss-daemon` (Android userspace) for some settings
 
 ### M2: Bluetooth
@@ -109,8 +116,9 @@ ioctls. Plan:
    from the EDID-chosen mode.
 2. Run a second refresher on the DP framebuffer when a hotplug event
    arrives (udev rule on the `switch`/extcon DP state).
-3. Run it as a second Xorg screen (or switch the session to it), so the
-   phone works like a small desktop on the monitor.
+3. Better: grow the DRM shim to a second CRTC/connector for the DP DECON,
+   with real hotplug, so KWin treats the monitor as a normal output. The
+   Plasma desktop session (floating windows) then runs on it.
 This is the least certain milestone.
 
 ### M4: polish

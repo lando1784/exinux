@@ -1,0 +1,5 @@
+# Plasma Mobile (Debian's metapackages, shared with Mobian)
+plasma-mobile-core plasma-mobile-tweaks maliit-keyboard
+# Plasma desktop session on the same KWin: floating windows, external monitor
+plasma-desktop plasma-nm bluedevil konsole dolphin
+sddm

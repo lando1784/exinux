@@ -1,9 +1,10 @@
 [Unit]
-Description=exinux: push framebuffer contents to the command-mode panel
+Description=exinux: push fbdev frames to the panel (fallback when the DRM shim is missing)
 DefaultDependencies=no
 After=systemd-udevd.service
 Before=display-manager.service
 ConditionPathExists=/dev/fb0
+ConditionPathExists=!/dev/dri/card0
 
 [Service]
 ExecStart=/usr/local/sbin/exinux-fb-refresher -d /dev/fb0 -r 30

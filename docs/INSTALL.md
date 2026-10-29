@@ -66,9 +66,11 @@ mode, and flashes `out/boot.img` with Heimdall. With Odin, put
 ## 5. First boot
 
 You'll see the Samsung "bootloader unlocked" warning, then the screen goes
-black while the kernel starts. If all goes well, the Xfce desktop appears
-(user `exinux`, password `exinux`; you'll be asked to change it at the
-first terminal login).
+black while the kernel starts. If all goes well, Plasma Mobile appears
+(user `exinux`, password `exinux`; change it with `passwd`). For floating
+windows, log out and pick the **Plasma** session in SDDM; it runs on the
+same KWin. Without GPU acceleration everything is drawn by the CPU, so
+animations will be choppy.
 
 ### If the screen stays black
 
@@ -79,12 +81,13 @@ in two places:
   ```sh
   sudo ip addr add 172.16.42.2/24 dev <usb-interface>   # e.g. enx…/usb0
   ssh exinux@172.16.42.1
-  journalctl -b; dmesg; systemctl status exinux-fb-refresher
+  journalctl -b; dmesg | grep -iE 'decon|drm'; ls /dev/dri
+  journalctl -b -u sddm; journalctl -b --user -u plasma-kwin_wayland
   ```
 * **The initramfs could not find the rootfs**: same interface, but it's a telnet shell:
   ```sh
   telnet 172.16.42.1
-  cat /run/exinux-initramfs.log; dmesg | tail -100; blkid
+  cat /run/exinux-initramfs.log; dmesg | tail -100; cat /proc/partitions
   ```
 
 Please save `dmesg` and `journalctl -b` output and bring it back here. These

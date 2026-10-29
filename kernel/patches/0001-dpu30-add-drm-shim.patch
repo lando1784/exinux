@@ -1,0 +1,341 @@
+From: exinux
+Subject: [PATCH] video: exynos: dpu30: add DRM/KMS shim over the DECON fbdev
+
+Lets Wayland compositors (KWin for Plasma Mobile) and Xorg modesetting use
+the panel without Android hwcomposer. Frames are copied into the DECON
+default window and pushed with decon_pan_display().
+---
+diff --git a/drivers/video/fbdev/exynos/dpu30/Kconfig b/drivers/video/fbdev/exynos/dpu30/Kconfig
+index 5a0daf8cd..07c6abc02 100644
+--- a/drivers/video/fbdev/exynos/dpu30/Kconfig
++++ b/drivers/video/fbdev/exynos/dpu30/Kconfig
+@@ -220,5 +220,13 @@ config EXYNOS_DOZE_FIRST_FRAME_BLACK
+         depends on EXYNOS_DPU30
+         default n
+ 
++config EXINUX_DECON_DRM
++	bool "DRM/KMS device on top of the DECON framebuffer (exinux)"
++	depends on EXYNOS_DPU30 && DRM_TINYDRM=y
++	help
++	  Expose the primary DECON window as a minimal DRM/KMS device so that
++	  Wayland compositors and Xorg's modesetting driver can use the panel
++	  without Android's hwcomposer.
++
+ source "drivers/video/fbdev/exynos/dpu30/panels/Kconfig"
+ source "drivers/video/fbdev/exynos/dpu30/mcd_hdr/Kconfig"
+diff --git a/drivers/video/fbdev/exynos/dpu30/Makefile b/drivers/video/fbdev/exynos/dpu30/Makefile
+index 13d225d9b..69d9576ac 100644
+--- a/drivers/video/fbdev/exynos/dpu30/Makefile
++++ b/drivers/video/fbdev/exynos/dpu30/Makefile
+@@ -27,6 +27,7 @@ obj-$(CONFIG_SOC_EXYNOS9830) += ./cal_9830/dqe_reg.o
+ endif
+ obj-$(CONFIG_EXYNOS_DPU30) += decon.o
+ obj-$(CONFIG_EXYNOS_BTS) += bts.o
++decon-$(CONFIG_EXINUX_DECON_DRM) += decon_drm.o
+ decon-y += decon_core.o decon_dsi.o decon_wb.o helper.o win_update.o cursor.o fence.o event_log.o format.o
+ obj-y += panels/
+ obj-y += mcd_hdr/
+diff --git a/drivers/video/fbdev/exynos/dpu30/decon_drm.c b/drivers/video/fbdev/exynos/dpu30/decon_drm.c
+new file mode 100644
+index 000000000..21281753c
+--- /dev/null
++++ b/drivers/video/fbdev/exynos/dpu30/decon_drm.c
+@@ -0,0 +1,298 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Minimal DRM/KMS device on top of the DECON fbdev (exinux).
++ *
++ * Wayland compositors (KWin, wlroots) and Xorg's modesetting driver need a
++ * DRM device. Android drives DECON through its own ioctls instead, so this
++ * exposes one fixed-mode CRTC backed by CMA dumb buffers. Every flip or
++ * dirty rectangle is copied into the DECON default window and pushed to the
++ * command-mode panel with decon_pan_display().
++ *
++ * Copyright (C) 2026 The exinux authors
++ */
++
++#include <linux/dma-buf.h>
++#include <linux/dma-mapping.h>
++#include <linux/fb.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_modeset_helper.h>
++#include <drm/tinydrm/tinydrm.h>
++#include <drm/tinydrm/tinydrm-helpers.h>
++
++#include "decon.h"
++
++struct decon_drm {
++	struct tinydrm_device tinydrm;
++	struct decon_device *decon;
++	struct fb_info *info;
++	struct dma_buf *scanout;
++	void *vaddr;
++	bool enabled;
++};
++
++static inline struct decon_drm *to_decon_drm(struct tinydrm_device *tdev)
++{
++	return container_of(tdev, struct decon_drm, tinydrm);
++}
++
++static void decon_drm_present(struct decon_drm *dd)
++{
++	struct fb_info *info = dd->info;
++	struct fb_var_screeninfo var;
++
++	if (!lock_fb_info(info))
++		return;
++	/* decon_pan_display() copies var into info->var, so pass a copy. */
++	var = info->var;
++	var.xoffset = 0;
++	var.yoffset = 0;
++	info->fbops->fb_pan_display(&var, info);
++	unlock_fb_info(info);
++}
++
++static int decon_drm_fb_dirty(struct drm_framebuffer *fb,
++			      struct drm_file *file_priv,
++			      unsigned int flags, unsigned int color,
++			      struct drm_clip_rect *clips,
++			      unsigned int num_clips)
++{
++	struct drm_gem_cma_object *cma_obj = drm_fb_cma_get_gem_obj(fb, 0);
++	struct dma_buf_attachment *import_attach = cma_obj->base.import_attach;
++	struct tinydrm_device *tdev = fb->dev->dev_private;
++	struct decon_drm *dd = to_decon_drm(tdev);
++	unsigned int dst_pitch = dd->info->fix.line_length;
++	unsigned int cpp = fb->format->cpp[0];
++	struct drm_clip_rect clip;
++	size_t len;
++	void *src, *dst;
++	unsigned int y;
++	int ret;
++
++	if (!dd->enabled)
++		return 0;
++
++	tinydrm_merge_clips(&clip, clips, num_clips, flags,
++			    fb->width, fb->height);
++	len = (clip.x2 - clip.x1) * cpp;
++
++	if (import_attach) {
++		ret = dma_buf_begin_cpu_access(import_attach->dmabuf,
++					       DMA_FROM_DEVICE);
++		if (ret)
++			return ret;
++	}
++	ret = dma_buf_begin_cpu_access(dd->scanout, DMA_TO_DEVICE);
++	if (ret)
++		goto out_import;
++
++	src = cma_obj->vaddr + fb->offsets[0] + clip.y1 * fb->pitches[0] +
++	      clip.x1 * cpp;
++	dst = dd->vaddr + clip.y1 * dst_pitch + clip.x1 * cpp;
++	for (y = clip.y1; y < clip.y2; y++) {
++		memcpy(dst, src, len);
++		src += fb->pitches[0];
++		dst += dst_pitch;
++	}
++
++	/* Flushes CPU caches so DECON's DMA sees the new pixels. */
++	dma_buf_end_cpu_access(dd->scanout, DMA_TO_DEVICE);
++out_import:
++	if (import_attach)
++		dma_buf_end_cpu_access(import_attach->dmabuf, DMA_FROM_DEVICE);
++
++	if (!ret)
++		decon_drm_present(dd);
++
++	return ret;
++}
++
++static const struct drm_framebuffer_funcs decon_drm_fb_funcs = {
++	.destroy	= drm_gem_fb_destroy,
++	.create_handle	= drm_gem_fb_create_handle,
++	.dirty		= tinydrm_fb_dirty,
++};
++
++static void decon_drm_blank(struct decon_drm *dd, int blank)
++{
++	struct fb_info *info = dd->info;
++
++	if (!lock_fb_info(info))
++		return;
++	info->fbops->fb_blank(blank, info);
++	unlock_fb_info(info);
++}
++
++static void decon_drm_pipe_enable(struct drm_simple_display_pipe *pipe,
++				  struct drm_crtc_state *crtc_state,
++				  struct drm_plane_state *plane_state)
++{
++	struct tinydrm_device *tdev = pipe_to_tinydrm(pipe);
++	struct decon_drm *dd = to_decon_drm(tdev);
++	struct drm_framebuffer *fb = plane_state->fb;
++
++	decon_drm_blank(dd, FB_BLANK_UNBLANK);
++	dd->enabled = true;
++	if (fb)
++		tdev->fb_dirty(fb, NULL, 0, 0, NULL, 0);
++}
++
++static void decon_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
++{
++	struct tinydrm_device *tdev = pipe_to_tinydrm(pipe);
++	struct decon_drm *dd = to_decon_drm(tdev);
++
++	dd->enabled = false;
++	decon_drm_blank(dd, FB_BLANK_POWERDOWN);
++}
++
++static const struct drm_simple_display_pipe_funcs decon_drm_pipe_funcs = {
++	.enable		= decon_drm_pipe_enable,
++	.disable	= decon_drm_pipe_disable,
++	.update		= tinydrm_display_pipe_update,
++	.prepare_fb	= drm_gem_fb_simple_display_pipe_prepare_fb,
++};
++
++/* DECON_PIXEL_FORMAT_BGRA_8888 is B,G,R,A in memory: DRM's XRGB8888. */
++static const u32 decon_drm_formats[] = {
++	DRM_FORMAT_XRGB8888,
++};
++
++DEFINE_DRM_GEM_CMA_FOPS(decon_drm_fops);
++
++static struct drm_driver decon_drm_driver = {
++	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_PRIME |
++				  DRIVER_ATOMIC,
++	.fops			= &decon_drm_fops,
++	TINYDRM_GEM_DRIVER_OPS,
++	.name			= "exynos-decon",
++	.desc			= "DRM shim over the Exynos DECON framebuffer",
++	.date			= "20261029",
++	.major			= 1,
++	.minor			= 0,
++};
++
++static int decon_drm_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct decon_device *decon = decon_drvdata[0];
++	struct drm_display_mode mode = { };
++	struct decon_drm *dd;
++	struct decon_win *win;
++	struct tinydrm_device *tdev;
++	int ret;
++
++	if (!decon || decon->dt.out_type != DECON_OUT_DSI)
++		return -EPROBE_DEFER;
++	win = decon->win[decon->dt.dft_win];
++	if (!win || !win->fbinfo || !win->dma_buf_data[0].dma_buf)
++		return -ENODEV;
++
++	dd = devm_kzalloc(dev, sizeof(*dd), GFP_KERNEL);
++	if (!dd)
++		return -ENOMEM;
++	dd->decon = decon;
++	dd->info = win->fbinfo;
++	dd->scanout = win->dma_buf_data[0].dma_buf;
++	if (dd->info->var.bits_per_pixel != 32) {
++		dev_err(dev, "unsupported DECON depth %u\n",
++			dd->info->var.bits_per_pixel);
++		return -EINVAL;
++	}
++
++	get_dma_buf(dd->scanout);
++	dd->vaddr = dma_buf_vmap(dd->scanout);
++	if (!dd->vaddr) {
++		dma_buf_put(dd->scanout);
++		return -ENOMEM;
++	}
++
++	/* Dumb buffers come from CMA through this device. */
++	arch_setup_dma_ops(dev, 0, 0, NULL, false);
++	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(64));
++	if (ret)
++		goto err_vunmap;
++
++	/* A fixed mode; the timings only need to describe 60 Hz to userspace. */
++	mode.hdisplay = mode.hsync_start = mode.hsync_end = mode.htotal =
++		dd->info->var.xres;
++	mode.vdisplay = mode.vsync_start = mode.vsync_end = mode.vtotal =
++		dd->info->var.yres;
++	mode.clock = mode.htotal * mode.vtotal * 60 / 1000;
++	mode.width_mm = dd->info->var.width;
++	mode.height_mm = dd->info->var.height;
++	mode.type = DRM_MODE_TYPE_DRIVER;
++
++	tdev = &dd->tinydrm;
++	ret = devm_tinydrm_init(dev, tdev, &decon_drm_fb_funcs,
++				&decon_drm_driver);
++	if (ret)
++		goto err_vunmap;
++	tdev->fb_dirty = decon_drm_fb_dirty;
++
++	ret = tinydrm_display_pipe_init(tdev, &decon_drm_pipe_funcs,
++					DRM_MODE_CONNECTOR_DSI,
++					decon_drm_formats,
++					ARRAY_SIZE(decon_drm_formats),
++					&mode, 0);
++	if (ret)
++		goto err_vunmap;
++
++	drm_mode_config_reset(tdev->drm);
++	platform_set_drvdata(pdev, dd);
++
++	ret = devm_tinydrm_register(tdev);
++	if (ret)
++		goto err_vunmap;
++
++	dev_info(dev, "DRM device for decon%d: %ux%u, %ux%u mm\n", decon->id,
++		 mode.hdisplay, mode.vdisplay, mode.width_mm, mode.height_mm);
++	return 0;
++
++err_vunmap:
++	dma_buf_vunmap(dd->scanout, dd->vaddr);
++	dma_buf_put(dd->scanout);
++	return ret;
++}
++
++static void decon_drm_shutdown(struct platform_device *pdev)
++{
++	struct decon_drm *dd = platform_get_drvdata(pdev);
++
++	if (dd)
++		tinydrm_shutdown(&dd->tinydrm);
++}
++
++static struct platform_driver decon_drm_platform_driver = {
++	.driver = {
++		.name = "exynos-decon-drm",
++	},
++	.probe = decon_drm_probe,
++	.shutdown = decon_drm_shutdown,
++};
++
++static int __init decon_drm_init(void)
++{
++	struct platform_device *pdev;
++	int ret;
++
++	ret = platform_driver_register(&decon_drm_platform_driver);
++	if (ret)
++		return ret;
++
++	pdev = platform_device_register_simple("exynos-decon-drm", -1, NULL, 0);
++	if (IS_ERR(pdev)) {
++		platform_driver_unregister(&decon_drm_platform_driver);
++		return PTR_ERR(pdev);
++	}
++	return 0;
++}
++/* After decon and the panel have probed. */
++late_initcall_sync(decon_drm_init);
++
++MODULE_DESCRIPTION("DRM shim over the Exynos DECON framebuffer");
++MODULE_LICENSE("GPL");
