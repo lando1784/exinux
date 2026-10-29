@@ -1,0 +1,13 @@
+[Unit]
+Description=exinux: USB network gadget (ssh exinux@172.16.42.1 from a PC)
+After=systemd-udevd.service sys-kernel-config.mount
+Wants=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/exinux-usb-gadget up
+ExecStop=/usr/local/sbin/exinux-usb-gadget down
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=exinux: grow the root filesystem to fill its partition (first boot)
+ConditionPathExists=!/var/lib/exinux/rootfs-grown
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'resize2fs "$(findmnt -no SOURCE /)" && mkdir -p /var/lib/exinux && touch /var/lib/exinux/rootfs-grown'
+
+[Install]
+WantedBy=multi-user.target

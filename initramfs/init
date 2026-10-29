@@ -1,0 +1,124 @@
+#!/bin/busybox sh
+# exinux initramfs: find the Debian root filesystem, mount it, switch_root.
+#
+# exinux.root= on the kernel command line picks where the rootfs lives:
+#   auto        (default) the ext4 filesystem labelled "exinux", preferring
+#               the microSD card over internal storage (userdata flashed
+#               with rootfs.img)
+#   /dev/xxx    a block device
+# exinux.debug=1 stops before switch_root and starts the USB debug shell.
+#
+# If anything fails we expose a telnet shell over USB networking:
+#   PC: ip addr add 172.16.42.2/24 dev <usb0>; telnet 172.16.42.1
+
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mkdir -p /proc /sys /dev /run /tmp /mnt/root /config
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /run
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+
+LOG=/run/exinux-initramfs.log
+log() { echo "exinux: $*" | tee -a $LOG > /dev/kmsg; }
+
+cmdline_arg() {
+    for a in $(cat /proc/cmdline); do
+        case "$a" in "$1"=*) echo "${a#*=}"; return ;; esac
+    done
+}
+
+# --- USB debug shell -------------------------------------------------------
+usb_debug_shell() {
+    log "starting USB debug shell (telnet 172.16.42.1)"
+    mount -t configfs configfs /config 2>/dev/null
+    G=/config/usb_gadget/exinux
+    if [ -d /config/usb_gadget ] && [ ! -d $G ]; then
+        mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409
+        echo 0x18d1 > $G/idVendor
+        echo 0xd001 > $G/idProduct
+        echo exinux > $G/strings/0x409/manufacturer
+        echo "Galaxy S20 FE (exinux debug)" > $G/strings/0x409/product
+        echo debug > $G/configs/c.1/strings/0x409/configuration
+        for f in rndis.usb0 acm.gs0; do
+            mkdir -p $G/functions/$f 2>/dev/null && ln -s $G/functions/$f $G/configs/c.1/
+        done
+        echo "$(ls /sys/class/udc | head -n1)" > $G/UDC
+    fi
+    sleep 2
+    IFACE=$(for i in usb0 rndis0; do [ -d /sys/class/net/$i ] && echo $i; done | head -n1)
+    if [ -n "$IFACE" ]; then
+        ip addr add 172.16.42.1/24 dev $IFACE
+        ip link set $IFACE up
+        cat > /run/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface $IFACE
+option subnet 255.255.255.0
+lease_file /run/udhcpd.leases
+EOF
+        touch /run/udhcpd.leases
+        udhcpd /run/udhcpd.conf
+        telnetd -l /bin/sh
+    fi
+    [ -e /dev/ttyGS0 ] && (while true; do getty -n -l /bin/sh 115200 ttyGS0; done) &
+    log "debug shell ready; log in $LOG, dmesg for kernel messages"
+    # Keep init alive; "exec switch_root ..." from the shell can still continue boot.
+    while true; do sleep 3600; done
+}
+
+fail() {
+    log "ERROR: $*"
+    usb_debug_shell
+}
+
+# --- locate the rootfs -----------------------------------------------------
+wait_for() {  # wait_for <seconds> <command...>
+    local n=$1; shift
+    while [ "$n" -gt 0 ]; do
+        "$@" && return 0
+        sleep 1; n=$((n - 1))
+    done
+    return 1
+}
+
+# LineageOS' userdata uses metadata encryption, so we cannot read files that
+# Android put there; internal installs overwrite userdata with rootfs.img.
+find_by_label() {
+    local devs
+    devs=$(blkid | grep 'LABEL="exinux"' | cut -d: -f1)
+    ROOTDEV=$(echo "$devs" | grep mmcblk | head -n1)
+    [ -n "$ROOTDEV" ] || ROOTDEV=$(echo "$devs" | head -n1)
+    [ -n "$ROOTDEV" ]
+}
+
+mount_auto() {
+    # The SD card can show up a few seconds after UFS; give it time.
+    wait_for 15 sh -c 'blkid | grep -q "mmcblk.*LABEL=\"exinux\""' ||
+        wait_for 5 find_by_label || return 1
+    find_by_label
+    log "rootfs on $ROOTDEV"
+    mount -t ext4 -o rw,noatime "$ROOTDEV" /mnt/root
+}
+
+ROOT=$(cmdline_arg exinux.root)
+log "starting, exinux.root=${ROOT:-auto}"
+
+case "${ROOT:-auto}" in
+    auto)   mount_auto ;;
+    /dev/*) wait_for 10 test -b "$ROOT" && mount -t ext4 -o rw,noatime "$ROOT" /mnt/root ;;
+    *)      false ;;
+esac || fail "could not mount the root filesystem (exinux.root=${ROOT:-auto})"
+
+[ -x /mnt/root/sbin/init ] || [ -L /mnt/root/sbin/init ] || fail "no /sbin/init in rootfs"
+[ "$(cmdline_arg exinux.debug)" = 1 ] && usb_debug_shell
+
+cp $LOG /mnt/root/var/log/ 2>/dev/null
+
+umount /dev/pts
+mount --move /dev /mnt/root/dev
+mount --move /run /mnt/root/run
+umount /sys /proc
+exec switch_root /mnt/root /sbin/init

@@ -1,0 +1,14 @@
+[Unit]
+Description=exinux: power up the QCA6390 Wi-Fi (qcacld)
+After=systemd-udevd.service
+Before=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/exinux-wlan up
+ExecStop=/usr/local/sbin/exinux-wlan down
+
+[Install]
+WantedBy=multi-user.target

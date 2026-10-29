@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 6.5" 1080x2400 panel: scale text and widgets for fingers. -->
+<channel name="xsettings" version="1.0">
+  <property name="Xft" type="empty">
+    <property name="DPI" type="int" value="192"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="CursorThemeSize" type="int" value="48"/>
+  </property>
+</channel>

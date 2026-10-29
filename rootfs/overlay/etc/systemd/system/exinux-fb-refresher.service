@@ -1,0 +1,15 @@
+[Unit]
+Description=exinux: push framebuffer contents to the command-mode panel
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=display-manager.service
+ConditionPathExists=/dev/fb0
+
+[Service]
+ExecStart=/usr/local/sbin/exinux-fb-refresher -d /dev/fb0 -r 30
+Restart=always
+RestartSec=1
+Nice=-5
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Expose RNDIS + serial over USB so the phone is reachable from a PC while
+# the display or Wi-Fi do not work yet. Disable with:
+#   systemctl disable exinux-usb-gadget
+G=/sys/kernel/config/usb_gadget/exinux
+case "$1" in
+up)
+    if [ ! -d $G ]; then
+        mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409
+        echo 0x18d1 > $G/idVendor
+        echo 0xd001 > $G/idProduct
+        echo exinux > $G/strings/0x409/manufacturer
+        echo "Galaxy S20 FE (exinux)" > $G/strings/0x409/product
+        echo net > $G/configs/c.1/strings/0x409/configuration
+        for f in rndis.usb0 acm.gs0; do
+            mkdir -p $G/functions/$f && ln -sf $G/functions/$f $G/configs/c.1/
+        done
+    fi
+    ls /sys/class/udc | head -n1 > $G/UDC
+    for i in $(seq 10); do [ -d /sys/class/net/usb0 ] && break; sleep 1; done
+    ip addr replace 172.16.42.1/24 dev usb0
+    ip link set usb0 up
+    systemctl start serial-getty@ttyGS0.service || true
+    ;;
+down)
+    [ -d $G ] && echo "" > $G/UDC
+    ;;
+esac
+exit 0
